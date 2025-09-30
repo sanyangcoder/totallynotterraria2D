@@ -1,0 +1,470 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Terraria Clone with Combat</title>
+  <style>
+    body {
+      margin: 0;
+      background: #87CEEB;
+      overflow: hidden;
+      font-family: Arial, sans-serif;
+    }
+    canvas {
+      display: block;
+      margin: 0 auto;
+    }
+
+    /* Health Bar */
+    #healthBar {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      width: 220px;
+      height: 24px;
+      background: #333;
+      border: 2px solid #fff;
+      border-radius: 6px;
+      overflow: hidden;
+    }
+    #healthFill {
+      height: 100%;
+      background: linear-gradient(to right, #ff4444, #cc0000);
+      width: 100%;
+    }
+
+    /* Hotbar */
+    #hotbar {
+      position: absolute;
+      bottom: 10px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 6px;
+      background: rgba(0, 0, 0, 0.6);
+      padding: 6px;
+      border-radius: 10px;
+    }
+    .slot {
+      width: 40px;
+      height: 40px;
+      border: 2px solid #aaa;
+      background: #222;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 12px;
+      color: white;
+      border-radius: 4px;
+      position: relative;
+    }
+    .slot.selected {
+      border-color: yellow;
+      box-shadow: 0 0 10px yellow;
+    }
+    .slot .count {
+      position: absolute;
+      bottom: 2px;
+      right: 4px;
+      font-size: 10px;
+      color: #fff;
+      text-shadow: 1px 1px 2px black;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="gameCanvas" width="800" height="600"></canvas>
+
+  <!-- Health Bar -->
+  <div id="healthBar">
+    <div id="healthFill"></div>
+  </div>
+
+  <!-- Hotbar -->
+  <div id="hotbar"></div>
+
+  <script>
+    const canvas = document.getElementById("gameCanvas");
+    const ctx = canvas.getContext("2d");
+
+    const TILE_SIZE = 32;
+    const ROWS = Math.floor(canvas.height / TILE_SIZE);
+    const COLS = Math.floor(canvas.width / TILE_SIZE);
+    const GRAVITY = 0.15;
+    const JUMP_FORCE = -4.5;
+    const MOVE_SPEED = 2.5;
+    const FRICTION = 0.0;
+
+    // Block types
+    const BLOCK_TYPES = {
+      0: { name: "Air", color: "transparent" },
+      1: { name: "Dirt", color: "#8B4513" },
+      2: { name: "Grass", color: "#228B22" },
+      3: { name: "Stone", color: "#808080" }
+    };
+
+    // Generate world
+    let world = [];
+    let surfaceHeights = [];
+    let currentHeight = Math.floor(ROWS / 2);
+    for (let x = 0; x < COLS; x++) {
+      if (Math.random() < 0.1) currentHeight += Math.random() < 0.5 ? -1 : 1;
+      currentHeight = Math.max(3, Math.min(ROWS - 5, currentHeight));
+      surfaceHeights[x] = currentHeight;
+    }
+    for (let y = 0; y < ROWS; y++) {
+      let row = [];
+      for (let x = 0; x < COLS; x++) {
+        const surface = surfaceHeights[x];
+        if (y < surface - 2) row.push(0);
+        else if (y < surface) row.push(2);
+        else if (y < surface + 3) row.push(1);
+        else row.push(3);
+      }
+      world.push(row);
+    }
+
+    // Player
+    let player = {
+      x: TILE_SIZE * 5,
+      y: TILE_SIZE * (surfaceHeights[5] - 3),
+      vx: 0,
+      vy: 0,
+      width: TILE_SIZE * 0.8,
+      height: TILE_SIZE * 1.2,
+      color: "red",
+      onGround: false,
+      facingRight: true,
+      inventory: { 1: 10, 2: 5, 3: 5 },
+      selectedBlock: 1,
+      health: 100,
+      maxHealth: 100,
+      attacking: false,
+      attackAngle: 0,
+      attackTimer: 0
+    };
+
+    // Sword constants
+    const SWORD_LENGTH = 40;
+    const SWORD_WIDTH = 8;
+    const ATTACK_DURATION = 15; // frames (~250ms)
+
+    // Enemy
+    class Enemy {
+      constructor(x, y) {
+        this.x = x;
+        this.y = y;
+        this.vx = (Math.random() < 0.5 ? -1 : 1) * 0.5;
+        this.vy = 0;
+        this.width = TILE_SIZE * 0.8;
+        this.height = TILE_SIZE * 0.8;
+        this.color = "green";
+        this.health = 20;
+        this.flashTimer = 0;
+      }
+      update() {
+        this.vy += GRAVITY;
+        this.x += this.vx;
+        this.y += this.vy;
+
+        if (isSolid(this.x, this.y + this.height) || isSolid(this.x + this.width, this.y + this.height)) {
+          this.y = Math.floor((this.y + this.height) / TILE_SIZE) * TILE_SIZE - this.height;
+          this.vy = 0;
+        }
+        if (isSolid(this.x, this.y) || isSolid(this.x + this.width, this.y)) {
+          this.vx *= -1;
+        }
+
+        if (rectOverlap(this, player)) damagePlayer(0.2);
+
+        if (this.flashTimer > 0) this.flashTimer--;
+      }
+      draw() {
+        ctx.fillStyle = this.flashTimer > 0 ? "red" : this.color;
+        ctx.fillRect(this.x, this.y, this.width, this.height);
+      }
+    }
+
+    let enemies = [];
+    let enemySpawnCooldown = 0;
+
+    function spawnEnemy() {
+      if (enemies.length >= 5) return;
+      const spawnX = Math.random() * canvas.width;
+      enemies.push(new Enemy(spawnX, 0));
+    }
+
+    function rectOverlap(a, b) {
+      return (
+        a.x < b.x + b.width &&
+        a.x + a.width > b.x &&
+        a.y < b.y + b.height &&
+        a.y + a.height > b.y
+      );
+    }
+
+    function damagePlayer(amount) {
+      player.health -= amount;
+      if (player.health <= 0) respawnPlayer();
+    }
+
+    function respawnPlayer() {
+      player.health = player.maxHealth;
+      player.x = TILE_SIZE * 5;
+      player.y = TILE_SIZE * (surfaceHeights[5] - 3);
+      player.vx = 0;
+      player.vy = 0;
+    }
+
+    // Mouse
+    let mouse = { x: 0, y: 0, tileX: 0, tileY: 0 };
+
+    // Day-night cycle
+    let time = 0;
+    let dayLength = 600;
+
+    canvas.addEventListener("mousemove", (e) => {
+      const rect = canvas.getBoundingClientRect();
+      mouse.x = e.clientX - rect.left;
+      mouse.y = e.clientY - rect.top;
+      mouse.tileX = Math.floor(mouse.x / TILE_SIZE);
+      mouse.tileY = Math.floor(mouse.y / TILE_SIZE);
+    });
+    canvas.addEventListener("click", (e) => {
+      if (e.button === 0 && !player.attacking) breakBlock();
+    });
+    canvas.addEventListener("contextmenu", (e) => { e.preventDefault(); placeBlock(); });
+
+    function isSolid(x, y) {
+      const tileX = Math.floor(x / TILE_SIZE);
+      const tileY = Math.floor(y / TILE_SIZE);
+      if (tileX < 0 || tileX >= COLS || tileY < 0 || tileY >= ROWS) return true;
+      return world[tileY][tileX] !== 0;
+    }
+
+    // Physics
+    function updatePhysics() {
+      let newX = player.x + player.vx;
+      if (player.vx !== 0) {
+        const dir = Math.sign(player.vx);
+        const aheadX = dir > 0 ? newX + player.width : newX;
+        const top = Math.floor(player.y / TILE_SIZE);
+        const bottom = Math.floor((player.y + player.height - 1) / TILE_SIZE);
+        const tileX = Math.floor(aheadX / TILE_SIZE);
+        for (let ty = top; ty <= bottom; ty++) {
+          if (world[ty] && world[ty][tileX] !== 0) {
+            if (dir > 0) newX = tileX * TILE_SIZE - player.width;
+            else newX = (tileX + 1) * TILE_SIZE;
+            player.vx = 0;
+            break;
+          }
+        }
+      }
+      player.x = newX;
+      player.vx *= FRICTION;
+
+      player.vy += GRAVITY;
+      let newY = player.y + player.vy;
+      player.onGround = false;
+      if (player.vy !== 0) {
+        const dir = Math.sign(player.vy);
+        const aheadY = dir > 0 ? newY + player.height : newY;
+        const left = Math.floor(player.x / TILE_SIZE);
+        const right = Math.floor((player.x + player.width - 1) / TILE_SIZE);
+        const tileY = Math.floor(aheadY / TILE_SIZE);
+        for (let tx = left; tx <= right; tx++) {
+          if (world[tileY] && world[tileY][tx] !== 0) {
+            if (dir > 0) {
+              newY = tileY * TILE_SIZE - player.height;
+              player.onGround = true;
+            } else {
+              newY = (tileY + 1) * TILE_SIZE;
+            }
+            player.vy = 0;
+            break;
+          }
+        }
+      }
+      player.y = newY;
+    }
+
+    // Sword attack
+    function startAttack() {
+      if (player.attacking) return;
+      player.attacking = true;
+      player.attackTimer = 0;
+    }
+
+    function updateAttack() {
+      if (!player.attacking) return;
+      player.attackTimer++;
+
+      let progress = player.attackTimer / ATTACK_DURATION;
+      let swingAngle = -Math.PI / 2 + progress * Math.PI; // -90° to +90°
+      if (!player.facingRight) swingAngle = Math.PI - swingAngle;
+      player.attackAngle = swingAngle;
+
+      // Sword tip position
+      const cx = player.x + player.width / 2;
+      const cy = player.y + player.height / 2;
+      const swordX = cx + Math.cos(swingAngle) * (SWORD_LENGTH / 2);
+      const swordY = cy + Math.sin(swingAngle) * (SWORD_LENGTH / 2);
+
+      enemies.forEach((enemy, i) => {
+        const ex = enemy.x + enemy.width / 2;
+        const ey = enemy.y + enemy.height / 2;
+        const dist = Math.hypot(ex - swordX, ey - swordY);
+        if (dist < SWORD_LENGTH / 2 + enemy.width / 2) {
+          enemy.health -= 10;
+          enemy.flashTimer = 5;
+        }
+      });
+
+      if (player.attackTimer >= ATTACK_DURATION) {
+        player.attacking = false;
+      }
+    }
+
+    function drawSword() {
+      if (!player.attacking) return;
+      const cx = player.x + player.width / 2;
+      const cy = player.y + player.height / 2;
+
+      ctx.save();
+      ctx.translate(cx, cy);
+      ctx.rotate(player.attackAngle);
+      ctx.fillStyle = "silver";
+      ctx.fillRect(0, -SWORD_WIDTH / 2, SWORD_LENGTH, SWORD_WIDTH);
+      ctx.restore();
+    }
+
+    // Drawing
+    function drawWorld() {
+      let light = Math.sin((time / dayLength) * Math.PI * 2);
+      ctx.fillStyle = `rgba(0, 0, 20, ${0.5 - light * 0.5})`;
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      for (let y = 0; y < ROWS; y++) {
+        for (let x = 0; x < COLS; x++) {
+          if (world[y][x] !== 0) {
+            ctx.fillStyle = BLOCK_TYPES[world[y][x]].color;
+            ctx.fillRect(x * TILE_SIZE, y * TILE_SIZE, TILE_SIZE, TILE_SIZE);
+          }
+        }
+      }
+    }
+
+    function drawPlayer() {
+      ctx.fillStyle = player.color;
+      ctx.fillRect(player.x, player.y, player.width, player.height);
+      ctx.fillStyle = "white";
+      const eyeX = player.facingRight ? player.x + player.width - 8 : player.x + 4;
+      ctx.fillRect(eyeX, player.y + 8, 4, 4);
+    }
+
+    function drawCursor() {
+      if (mouse.tileX >= 0 && mouse.tileX < COLS && mouse.tileY >= 0 && mouse.tileY < ROWS) {
+        ctx.strokeStyle = "yellow";
+        ctx.lineWidth = 2;
+        ctx.strokeRect(mouse.tileX * TILE_SIZE, mouse.tileY * TILE_SIZE, TILE_SIZE, TILE_SIZE);
+      }
+    }
+
+    function updateUI() {
+      const healthPercent = Math.max(0, player.health / player.maxHealth) * 100;
+      document.getElementById("healthFill").style.width = healthPercent + "%";
+
+      const hotbar = document.getElementById("hotbar");
+      hotbar.innerHTML = "";
+      Object.keys(player.inventory).forEach(id => {
+        const slot = document.createElement("div");
+        slot.classList.add("slot");
+        if (parseInt(id) === player.selectedBlock) slot.classList.add("selected");
+        slot.style.backgroundColor = BLOCK_TYPES[id].color;
+        const count = document.createElement("div");
+        count.classList.add("count");
+        count.textContent = player.inventory[id];
+        slot.appendChild(count);
+        hotbar.appendChild(slot);
+      });
+    }
+
+    function breakBlock() {
+      const tx = mouse.tileX, ty = mouse.tileY;
+      if (world[ty] && world[ty][tx] !== 0) {
+        const blockId = world[ty][tx];
+        player.inventory[blockId] = (player.inventory[blockId] || 0) + 1;
+        world[ty][tx] = 0;
+      }
+    }
+    function placeBlock() {
+      const tx = mouse.tileX, ty = mouse.tileY;
+      if (world[ty] && world[ty][tx] === 0 && player.inventory[player.selectedBlock] > 0) {
+        world[ty][tx] = player.selectedBlock;
+        player.inventory[player.selectedBlock]--;
+      }
+    }
+
+    function draw() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      drawWorld();
+      drawPlayer();
+      drawSword();
+      drawCursor();
+      enemies.forEach(e => e.draw());
+      updateUI();
+      time = (time + 1) % dayLength;
+    }
+
+    // Controls
+    let keys = {};
+    document.addEventListener("keydown", (e) => {
+      keys[e.key] = true;
+      if (e.key >= "1" && e.key <= "3") {
+        const blockId = parseInt(e.key);
+        if (player.inventory[blockId]) player.selectedBlock = blockId;
+      }
+      if (e.key === "f") startAttack();
+    });
+    document.addEventListener("keyup", (e) => { keys[e.key] = false; });
+
+    function handleInput() {
+      if (keys["ArrowLeft"] || keys["a"]) {
+        player.vx = Math.max(player.vx - MOVE_SPEED, -MOVE_SPEED * 3);
+        player.facingRight = false;
+      }
+      if (keys["ArrowRight"] || keys["d"]) {
+        player.vx = Math.min(player.vx + MOVE_SPEED, MOVE_SPEED * 3);
+        player.facingRight = true;
+      }
+      if ((keys["ArrowUp"] || keys["w"] || keys[" "]) && player.onGround) {
+        player.vy = JUMP_FORCE;
+        player.onGround = false;
+      }
+    }
+
+    // Game Loop
+    function gameLoop() {
+      handleInput();
+      updatePhysics();
+      updateAttack();
+
+      enemies.forEach((e, i) => {
+        e.update();
+        if (e.health <= 0) enemies.splice(i, 1);
+      });
+
+      // Spawn enemies only at night
+      const isNight = time % dayLength > dayLength * 0.5;
+      if (isNight && enemySpawnCooldown <= 0) {
+        spawnEnemy();
+        enemySpawnCooldown = 120; // cooldown frames
+      }
+      if (enemySpawnCooldown > 0) enemySpawnCooldown--;
+
+      draw();
+      requestAnimationFrame(gameLoop);
+    }
+    gameLoop();
+  </script>
+</body>
+</html>
